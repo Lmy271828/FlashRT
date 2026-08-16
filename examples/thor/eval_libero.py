@@ -161,6 +161,7 @@ def eval_single_task(args, task_id):
         framework=args.framework,
         num_views=2,
         autotune=args.autotune,
+        use_fp4=getattr(args, 'use_fp4', False),
     )
 
     successes = 0
@@ -205,6 +206,7 @@ def main():
     parser.add_argument("--replan_steps", type=int, default=5)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--quick", action="store_true", help="Quick: 3 tasks x 3 trials")
+    parser.add_argument("--use_fp4", action="store_true", help="NVFP4 encoder FFN (Thor)")
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
@@ -252,6 +254,8 @@ def main():
                '--replan_steps', str(args.replan_steps),
                '--seed', str(args.seed),
                '--_task_id', str(tid)]
+        if getattr(args, 'use_fp4', False):
+            cmd.append('--use_fp4')
 
         logger.info(f"Launching task {tid}...")
         ret = _sp.run(cmd, env=env, timeout=3600)
@@ -314,6 +318,7 @@ if __name__ == "__main__":
         parser.add_argument("--num_trials", type=int, default=50)
         parser.add_argument("--replan_steps", type=int, default=5)
         parser.add_argument("--seed", type=int, default=7)
+        parser.add_argument("--use_fp4", action="store_true")
         args = parser.parse_args()
 
         result = eval_single_task(args, task_id)
