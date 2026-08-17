@@ -195,11 +195,32 @@ format**; `--fold mean` is kept for ablation only. This also shrinks the
 runtime story — no per-step scale dispatch is needed on the E0M3 path.
 
 Remaining caveats: synthetic activations (lognormal + outlier channels,
-calibrated only at the q999 point) — real activation tails differ; only
-one layer confirmed on hardware so far. Next: kernel mode on the other
-three layers, captured real activations, then LIBERO paired SR.
+calibrated only at the q999 point) — real activation tails differ. Next:
+captured real activations, then LIBERO paired SR (Milestone 2).
 
-## 5. Milestone-1 deliverables
+## 5. Roadmap and Milestone-1 deliverables
+
+**Milestone 1 — offline converter + format doc + single-layer gates
+(done).** Deliverables below; acceptance: 252/252 records converted, S0
+per-token cosine ≥ Omega fake-quant on real hardware (4/4 layers, §4).
+
+**Milestone 2 — runtime consumption (next).** Wire the converted pack
+into the pi0.5 Thor pipeline: load `packed`/`sfb` as decoder GEMM
+operands, run the DuQuant input rotation (perm + 64×64 block bmm) and
+output restore around each replaced Linear, keep the small projections
+(state/action/time) BF16 from the checkpoint. Acceptance: end-to-end
+action cosine vs. the Omega fake-quant server, then LIBERO-10 ×500
+paired SR vs. the BF16 baseline (target: no measurable loss, matching
+the pack's own 93.2% vs 91.6%).
+
+**Milestone 3 — upstream PRs (after M2 evidence).** Split per
+`CONTRIBUTING.fork.md` §6, each with LIBERO paired SR + action cosine +
+p50/p95 latency: ① converter + this format doc (pure additive, easiest);
+② runtime wiring as a flag-gated `weight_format` branch (the S0 result
+shrunk this from the originally-planned per-step scale path); ③ SVDQuant
+low-rank epilogue (deferred — rank = 0 in this pack).
+
+Deliverables:
 
 - `tools/convert_omega_pack_e0m3.py` — offline pack → E0M3 converter
   (S0 weight emission + aux tensors: perm, R_in/R_out blocks,

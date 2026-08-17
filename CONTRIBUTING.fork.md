@@ -59,9 +59,11 @@
 
 1. `tools/`：Omega-QVLA pack → E0M3+UE4M3 布局转换器 + 格式文档
    （纯 additive，最易收；参照作者 GGUF Q4_0/Q4_K 映射笔记的形态）
-2. per-step scale 消费路径（flag-gated `weight_format` 分支，
-   参照 `pipeline_thor.py` 现有三路路由）
-3. SVDQuant 低秩分支 epilogue 融合
+2. runtime 消费接线（flag-gated `weight_format` 分支，
+   参照 `pipeline_thor.py` 现有三路路由）。
+   注：原计划是"per-step scale 消费路径"，S0 实测（docs/omega_pack_e0m3.md §4）
+   证明动态 per-16 amax 已足够，不需要 per-step 表调度，PR 内容改为接线
+3. SVDQuant 低秩分支 epilogue 融合（本 pack rank=0，可推迟）
 每个 PR 附：LIBERO 逐任务成功率配对 + action cosine + p50/p95 延迟对照。
 
 ## 7. 行为备忘
