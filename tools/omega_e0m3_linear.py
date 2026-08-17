@@ -72,6 +72,17 @@ class OmegaE0M3Linear(nn.Module):
         self.bias = (nn.Parameter(base.bias.detach().clone())
                      if base.bias is not None else None)
 
+        # gr00t's wrap_gptq logs `wrapped._quant_available` after building;
+        # keep the attribute so the patched-in class stays logging-compatible.
+        self._quant_available = True
+        # The transformers_replace gemma code inspects
+        # `layers[0].self_attn.q_proj.weight.dtype` to pick its precision
+        # branch. Omega's GptqLinear answers with a zero-element placeholder
+        # (weights live in packed form); mirror that contract.
+        self.register_buffer(
+            "_weight_fp",
+            torch.empty(0, dtype=base.weight.dtype), persistent=False)
+
         self.register_buffer("_packed", w["packed"], persistent=False)
         self.register_buffer("_sfb", w["sfb"], persistent=False)
         self.register_buffer("_perm", aux["duquant_rotation_perm"].long(),
@@ -81,16 +92,22 @@ class OmegaE0M3Linear(nn.Module):
         self.register_buffer("_r_out", aux["duquant_rotation_out_blocks"],
                              persistent=False)
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Zero-element placeholder carrying the base dtype (see __init__)."""
+        return self._weight_fp
+
     def _rotate(self, x: torch.Tensor, perm: Optional[torch.Tensor],
                 blocks: torch.Tensor) -> torch.Tensor:
         """x[M, D] -> bmm(x[:, perm].view(M, nb, B), blocks); matches Omega."""
         nb, b, _ = blocks.shape
+        m = x.shape[0]
         if perm is not None:
             x = x.index_select(dim=-1, index=perm)
-        x = x.reshape(-1, nb, b)
+        x = x.reshape(m, nb, b)
         x = torch.bmm(x.transpose(0, 1).contiguous(),
                       blocks.to(dtype=x.dtype))
-        return x.transpose(0, 1).contiguous().reshape(x.shape[0], nb * b)
+        return x.transpose(0, 1).contiguous().reshape(m, nb * b)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         import flash_rt.flash_rt_fp4 as fvk_fp4
