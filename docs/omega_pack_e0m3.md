@@ -1,5 +1,47 @@
 # Omega-QVLA pack format and the E0M3 consumption contract
 
+## 0. Background concepts (90 seconds)
+
+- **4-bit quantization**: store `round(x / s)` (a small integer) plus the
+  "ruler" `s` (the scale) instead of `x`. Compute happens as
+  `integer × s`. Fewer bits = less memory bandwidth, more rounding error.
+- **fake-quant**: quantize then *immediately dequantize*, staying in float.
+  Simulates quantization error without needing integer hardware — Omega's
+  whole runtime is fake-quant emulation on plain PyTorch matmuls.
+- **scale granularity**: how many elements share one ruler. *Per-channel* =
+  each of the K input channels gets its own (Omega's choice). *Per-16
+  block* = 16 adjacent elements share one (the hardware format's choice).
+  Coarser granularity = fewer scales to store, but elements of different
+  magnitudes get crushed under a shared ruler.
+- **static vs. dynamic scale**: *static* = measured offline on calibration
+  data, stored in the pack (Omega's `act_scale_table`). *Dynamic* =
+  computed per token at runtime from the actual data (`amax / 7`). Dynamic
+  is fresher but constrains the layout to what hardware computes cheaply.
+- **E0M3**: the 4-bit element format here — sign + 3 mantissa-ish bits
+  decoding the uniform integer grid −7..+7. "Uniform" = evenly spaced
+  levels, unlike E2M1 (NVFP4) whose levels bunch near zero.
+- **UE4M3**: an unsigned 4-exponent/3-mantissa mini-float used *only for
+  scales* (the ruler itself is quantized too). Per-16 scales on both
+  operands are UE4M3.
+- **packed + SFA/SFB**: 4-bit elements are stored two per byte ("packed");
+  the per-16 scales live in a separate buffer in CUTLASS's tile-interleaved
+  layout (SFA for the activation operand, SFB for the weight operand).
+- **DuQuant rotation / permutation**: a learned orthogonal transform
+  (64×64 blocks + a channel shuffle) applied to activations before
+  quantization. Its job: even out channel magnitudes so no single outlier
+  channel dominates a shared scale. Orthogonal = length- and
+  angle-preserving, so it is mathematically free.
+- **tcgen05 MMA**: the SM100/SM110 tensor-core instruction that consumes
+  packed 4-bit operands + UE4M3 scales directly in hardware. This is the
+  payoff: Omega's math runs as emulation today; this instruction makes it
+  native.
+- **cosine similarity**: the fidelity metric. 1.0 = identical direction;
+  per-token cos 0.98 means the quantized output vector points in nearly
+  the same direction as the reference, with ~2% orthogonal noise.
+
+With those nine, every section below should read top to bottom without
+external references.
+
 Status: recon complete, converter/harness in `tools/` (Milestone 1).
 Scope: `packs_hf/pi05_long/quantized.pt` (4.8 GB, pi0.5 LIBERO-10 recipe
 `paligemma=svdh+gptq, expert=svdh+rtn+perstep`). Other Omega packs share the
@@ -101,10 +143,10 @@ RHT (per-16 Hadamard, `use_rht=1` variants) is orthogonal to the DuQuant
 rotation — `(x2·H)(W·H)^T = x2·W^T` — and can be ablated on top of either
 strategy if per-block distributions remain problematic.
 
-### Measured (emulation mode, synthetic activations calibrated to q999 = 7·s_t)
+### Measured
 
-Per-token cosine vs. the unquantized-activation reference, 4 layers
-(M = 256 tokens, K = 1024–4096):
+Emulation mode (torch, synthetic activations calibrated to q999 = 7·s_t,
+M = 256 tokens), per-token cosine vs. the unquantized-activation reference:
 
 | layer | omega vs fp | S0 vs fp | S1 vs fp |
 |---|---|---|---|
@@ -113,24 +155,43 @@ Per-token cosine vs. the unquantized-activation reference, 4 layers
 | expert L11 o_proj (K=2048) | 0.9929 | 0.9825 | 0.9615 |
 | paligemma L0 gate_proj (K=2048) | 0.9928 | 0.9810 | 0.9775 |
 
-**S0 wins everywhere; S1 is never better and sometimes much worse.** The
-table's per-channel scale spread (~4×) distorts the weight distribution
-when folded (small-scale columns share a per-16 block scale with large ones
-and quantize to few levels), while S0's per-token dynamic per-16 amax turns
-out to be a *better* quantizer than Omega's static per-channel table — the
-DuQuant rotation+perm has already whitened per-channel magnitudes, so the
-table is only a second-order correction. Cost of dropping it: ~0.01
-per-token cosine on every layer tested.
+Kernel mode (real tcgen05 GEMM, Thor SM110, expert L0 q_proj, same seed):
+
+| | omega vs fp | S0 vs fp | S1 vs fp |
+|---|---|---|---|
+| per-token mean | 0.99247 | **0.99322** | 0.158 |
+| min | 0.98395 | 0.98881 | -0.019 |
+
+Three findings:
+
+1. **S0 is lossless on real hardware** — 0.9932 vs. Omega's own 0.9925,
+   statistically a tie (the tiny edge comes from dynamic per-token amax
+   beating a static table on data calibrated only at the q999 point).
+   Error independence holds: cos(S0, fp)·cos(omega, fp) = 0.9862 ≈
+   measured cos(S0, omega) = 0.9866, i.e. S0's residual is fresh
+   rounding noise, not a systematic shift.
+2. **S1 collapses on real hardware** (0.16, vs. 0.905 in emulation).
+   Mechanism: `W · diag(s̄)` shrinks weights by ~16× (s̄ ≈ 0.03–0.1),
+   pushing per-16 block scales to ~2·10⁻³ — the UE4M3 subnormal floor
+   (2⁻⁹). Scale mantissas disintegrate there and whole blocks quantize to
+   garbage. The emulator's lenient subnormal handling masked this.
+3. The pure-torch references reproduce across machines to 5 decimal
+   places (0.992700 Thor vs. 0.992707 x86), cross-validating the harness.
+
+**S0 wins; S1 is dead.** The table's per-channel scale spread (~4×)
+distorts weights when folded, while S0's per-token dynamic per-16 amax is
+a *better* quantizer than Omega's static per-channel table — the DuQuant
+rotation+perm has already whitened per-channel magnitudes, so the table
+is only a second-order correction.
 
 Decision: **the converter emits S0 (`--fold none`) as the production
 format**; `--fold mean` is kept for ablation only. This also shrinks the
 runtime story — no per-step scale dispatch is needed on the E0M3 path.
 
-Caveats before treating this as final: (a) synthetic activations
-(lognormal + outlier channels, calibrated only at the q999 point) — real
-activation tails differ; (b) torch emulation approximates UE4M3 rounding
-and MMA accumulation order; (c) single-layer, 4 instances. Confirm with
-`--mode kernel` on Thor, then with captured real activations, then LIBERO.
+Remaining caveats: synthetic activations (lognormal + outlier channels,
+calibrated only at the q999 point) — real activation tails differ; only
+one layer confirmed on hardware so far. Next: kernel mode on the other
+three layers, captured real activations, then LIBERO paired SR.
 
 ## 5. Milestone-1 deliverables
 
@@ -149,6 +210,30 @@ LIBERO paired SR on a runtime wired to the converted pack (Milestone 2).
 Deferred: SVDQuant low-rank epilogue (rank = 0 everywhere in this pack),
 per-step weight tables (10× memory; also refuted by the S0 result),
 per-step activation scale dispatch (refuted by the S0 result).
+
+### Reproducing
+
+```bash
+# Point at an Omega pack (any machine for emulate, Thor for kernel/convert)
+export OMEGA_PACK=/path/to/packs_hf/pi05_long/quantized.pt
+cd third_party/flashrt
+
+# 1. Local pre-check, no extension needed (pure torch, CPU is fine)
+python tools/check_omega_e0m3_layer.py --pack "$OMEGA_PACK" --mode emulate
+
+# 2. Hardware check — real tcgen05 GEMM (Thor, flash_rt_fp4 built)
+python tools/check_omega_e0m3_layer.py --pack "$OMEGA_PACK" --mode kernel
+python tools/check_omega_e0m3_layer.py --pack "$OMEGA_PACK" --mode kernel \
+    --layer paligemma_with_expert.gemma_expert.model.layers.0.mlp.down_proj
+
+# 3. Full conversion (252 layers, ~1.3 GB output)
+python tools/convert_omega_pack_e0m3.py \
+    --pack "$OMEGA_PACK" --out pi05_long_e0m3.pt --fold none
+```
+
+Gate for accepting the conversion: per-token cosine of S0 vs. fp ≥
+Omega's own fake-quant (per-layer, same seed). Currently met on every
+layer tested (see §4).
 
 ## 6. Accuracy context (pi0.5 LIBERO-10, 500 episodes)
 
