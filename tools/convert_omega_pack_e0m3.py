@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline converter: Omega-QVLA dit_svdquant_v1 pack -> FlashRT E0M3 weights.
+r"""Offline converter: Omega-QVLA dit_svdquant_v1 pack -> FlashRT E0M3 weights.
 
 Reads an Omega-QVLA quantized pack (see docs/omega_pack_e0m3.md for the
 record schema) and re-quantizes every `weight_res_q` tensor into the

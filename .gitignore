@@ -20,6 +20,7 @@ build*/
 *.pkl
 *.safetensors
 *.npz
+*.pt
 !tests/fixtures/cfg_reference_outputs.npz
 
 # Cache

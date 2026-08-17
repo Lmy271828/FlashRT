@@ -155,26 +155,32 @@ M = 256 tokens), per-token cosine vs. the unquantized-activation reference:
 | expert L11 o_proj (K=2048) | 0.9929 | 0.9825 | 0.9615 |
 | paligemma L0 gate_proj (K=2048) | 0.9928 | 0.9810 | 0.9775 |
 
-Kernel mode (real tcgen05 GEMM, Thor SM110, expert L0 q_proj, same seed):
+Kernel mode (real tcgen05 GEMM, Thor SM110, same seed, per-token mean
+cosine vs. the unquantized-activation reference):
 
-| | omega vs fp | S0 vs fp | S1 vs fp |
+| layer | omega vs fp | S0 vs fp | S1 vs fp |
 |---|---|---|---|
-| per-token mean | 0.99247 | **0.99322** | 0.158 |
-| min | 0.98395 | 0.98881 | -0.019 |
+| expert L0 q_proj (K=1024) | 0.99247 | **0.99322** | 0.158 |
+| expert L0 down_proj (K=4096) | 0.99274 | **0.99257** | 0.98999 |
+| expert L11 o_proj (K=2048) | 0.99275 | **0.99303** | 0.85557 |
+| paligemma L0 gate_proj (K=2048) | 0.99206 | **0.99239** | 0.98204 |
 
 Three findings:
 
-1. **S0 is lossless on real hardware** — 0.9932 vs. Omega's own 0.9925,
-   statistically a tie (the tiny edge comes from dynamic per-token amax
-   beating a static table on data calibrated only at the q999 point).
-   Error independence holds: cos(S0, fp)·cos(omega, fp) = 0.9862 ≈
-   measured cos(S0, omega) = 0.9866, i.e. S0's residual is fresh
-   rounding noise, not a systematic shift.
-2. **S1 collapses on real hardware** (0.16, vs. 0.905 in emulation).
-   Mechanism: `W · diag(s̄)` shrinks weights by ~16× (s̄ ≈ 0.03–0.1),
-   pushing per-16 block scales to ~2·10⁻³ — the UE4M3 subnormal floor
-   (2⁻⁹). Scale mantissas disintegrate there and whole blocks quantize to
-   garbage. The emulator's lenient subnormal handling masked this.
+1. **S0 is lossless on real hardware on every layer tested** — within
+   ±0.001 of Omega's own fake-quant everywhere (the tiny edges come from
+   dynamic per-token amax beating a static table on data calibrated only
+   at the q999 point). Error independence holds wherever checked:
+   cos(S0, fp)·cos(omega, fp) ≈ measured cos(S0, omega), i.e. S0's
+   residual is fresh rounding noise, not a systematic shift.
+2. **S1's collapse on real hardware is scale-magnitude-dependent.**
+   Mechanism: `W · diag(s̄)` shrinks weights by the mean table value,
+   pushing per-16 block scales toward the UE4M3 subnormal floor (2⁻⁹),
+   where scale mantissas disintegrate and whole blocks quantize to
+   garbage. Layers with small s̄ die hard (q_proj 0.16, o_proj 0.86);
+   layers whose table happens to be larger merely degrade (down_proj
+   0.99 — still worse than S0). The emulator's lenient subnormal
+   handling masked the severe cases.
 3. The pure-torch references reproduce across machines to 5 decimal
    places (0.992700 Thor vs. 0.992707 x86), cross-validating the harness.
 
@@ -215,17 +221,27 @@ per-step activation scale dispatch (refuted by the S0 result).
 
 ```bash
 # Point at an Omega pack (any machine for emulate, Thor for kernel/convert)
-export OMEGA_PACK=/path/to/packs_hf/pi05_long/quantized.pt
+export OMEGA_PACK=/path/to/Omega-QVLA/packs_hf/pi05_long/quantized.pt
 cd third_party/flashrt
 
 # 1. Local pre-check, no extension needed (pure torch, CPU is fine)
 python tools/check_omega_e0m3_layer.py --pack "$OMEGA_PACK" --mode emulate
-
+ 
 # 2. Hardware check — real tcgen05 GEMM (Thor, flash_rt_fp4 built)
 python tools/check_omega_e0m3_layer.py --pack "$OMEGA_PACK" --mode kernel
+```
+
+```bash
+# 2. Hardware check output
+layer: paligemma_with_expert.gemma_expert.model.layers.0.self_attn.q_proj  N(out)=2048 K(in)=1024  table=(10,1024) step=0
+
+references:...
+```
+```bash
 python tools/check_omega_e0m3_layer.py --pack "$OMEGA_PACK" --mode kernel \
     --layer paligemma_with_expert.gemma_expert.model.layers.0.mlp.down_proj
-
+  # --layer paligemma_with_expert.paligemma.model.language_model.layers.0.mlp.gate_proj
+  # --layer paligemma_with_expert.gemma_expert.model.layers.11.self_attn.o_proj
 # 3. Full conversion (252 layers, ~1.3 GB output)
 python tools/convert_omega_pack_e0m3.py \
     --pack "$OMEGA_PACK" --out pi05_long_e0m3.pt --fold none
