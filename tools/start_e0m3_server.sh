@@ -33,7 +33,7 @@ sudo docker run -d --name pi05_server --runtime nvidia \
            cp -r src/openpi/models_pytorch/transformers_replace/* \$TF_DIR/ && \
            export PYTHONPATH=packages/openpi-client/src:src:.:/opt/omega:/workspace/third_party/flashrt && \
            export OMEGA_E0M3_PACK=/workspace/third_party/flashrt/pi05_long_e0m3.pt && \
-           export OMEGA_E0M3_CUDA_GRAPH=${OMEGA_E0M3_CUDA_GRAPH:-0} && \
+           export OMEGA_E0M3_CUDA_GRAPH=${OMEGA_E0M3_CUDA_GRAPH:-1} && \
            export GR00T_GPTQ=1 \
                   GR00T_GPTQ_PATH=/opt/omega/packs_hf/pi05_long/quantized.pt \
                   GR00T_GPTQ_INCLUDE='.*paligemma_with_expert\.gemma_expert\.model\.layers\.[0-9]+\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj).*' \

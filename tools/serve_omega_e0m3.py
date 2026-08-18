@@ -20,9 +20,11 @@ Environment:
                             (~25 min per episode). Eager + tcgen05 GEMM is
                             both faster and simpler on this path. Set 0 to
                             keep the checkpoint's compile mode.
-  OMEGA_E0M3_CUDA_GRAPH  1 to capture the 10-step denoise loop into a
-                            single CUDA graph (tools/omega_e0m3_graph.py);
-                            default 0 = plain eager. Capture is lazy (first
+  OMEGA_E0M3_CUDA_GRAPH  0 to disable capturing the 10-step denoise loop
+                            into a single CUDA graph
+                            (tools/omega_e0m3_graph.py); default 1
+                            (validated: smoke 10/10, 50-ep 45/50 = 90.0%
+                            ≈ eager 90.4%). Capture is lazy (first
                             inference) and falls back to eager on failure.
   OMEGA_SERVICE             service script path
                             (default /opt/omega/scripts/openpi_inference_service.py)

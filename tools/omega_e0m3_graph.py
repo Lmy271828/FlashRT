@@ -225,7 +225,7 @@ class GraphedDenoise:
 
 def install(model, num_steps: int = 10) -> GraphedDenoise | None:
     """Install the graphed sample_actions if $OMEGA_E0M3_CUDA_GRAPH=1."""
-    if os.environ.get(ENV_FLAG, "0") in ("0", "false", "False"):
+    if os.environ.get(ENV_FLAG, "1") in ("0", "false", "False"):
         print("[OMEGA-E0M3] cuda graph: disabled "
               f"(set {ENV_FLAG}=1 to enable)", flush=True)
         return None
