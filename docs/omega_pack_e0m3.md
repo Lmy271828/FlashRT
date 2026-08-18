@@ -194,6 +194,37 @@ Decision: **the converter emits S0 (`--fold none`) as the production
 format**; `--fold mean` is kept for ablation only. This also shrinks the
 runtime story — no per-step scale dispatch is needed on the E0M3 path.
 
+**Follow-up: `actnorm` (floor-safe S1) — also dead (2026-08-18).** A
+reviewer-natural fix for S1's floor problem is to normalize before
+folding: decompose `s̄ = c·r̄` with `c = geomean(s̄)`, fold only `r̄`
+(O(1), geomean 1) into the weights, divide activations by `s̄` at
+runtime, and absorb `c` into the GEMM alpha. This is exactly
+`(x/s̄) @ (W·r̄)^T · c = x @ W^T`, and it does fix the floor (0% of
+block scales below 2⁻⁹ vs 100% for raw S1 on q_proj). But measured on
+Thor (consumer-level, fp16 reference, real pack):
+
+| layer | S0 vs fp16 | actnorm vs fp16 |
+|---|---|---|
+| q_proj | 0.9935 | 0.9886 |
+| down_proj | 0.9929 | 0.9869 |
+| o_proj | 0.9936 | 0.9885 |
+
+actnorm is *worse* than S0 everywhere. Mechanism: the fold is a zero-sum
+redistribution — dividing activations by `s̄` whitens the activation
+blocks, but multiplying weights by `r̄` (range 0.43–2.68 on q_proj)
+re-opens intra-block magnitude spread on the weight side, where per-16
+single-scale 4-bit pays for it. DuQuant's rotation had already whitened
+both operands; any per-channel re-scaling of either side undoes that.
+**Per-channel calibration tables are fundamentally incompatible with
+per-16 block quantization — the information has to live on one side and
+always de-whitens it.** Dynamic per-16 amax is the optimum at this
+granularity; S0 is the endpoint, not a compromise. (`--fold actnorm` +
+consumer support remain in the tree, `OMEGA_E0M3_ACT_TABLE=0`/artifact
+driven, as the documented ablation.) The residual end-to-end gap vs.
+the full Omega recipe (90.4% vs 93.2%, concentrated in task9) is not
+recoverable by table injection; remaining options are mixed precision
+for sensitive layers or acceptance.
+
 Remaining caveats: synthetic activations (lognormal + outlier channels,
 calibrated only at the q999 point) — real activation tails differ. Next:
 captured real activations, then LIBERO paired SR (Milestone 2).

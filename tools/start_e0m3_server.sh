@@ -7,6 +7,8 @@
 #
 #   OPENPI_ROOT   default: repo root derived from this file (third_party/flashrt)
 #   OMEGA_ROOT    default: $HOME/lmy/Omega-QVLA
+#   OMEGA_E0M3_PACK   default: /workspace/third_party/flashrt/pi05_long_e0m3.pt
+#                     (container path! e.g. the actnorm A/B artifact)
 #   OPENPI_CACHE  default: $HOME/.cache/openpi
 #
 # Usage:
@@ -32,7 +34,7 @@ sudo docker run -d --name pi05_server --runtime nvidia \
   bash -c "TF_DIR=/usr/local/lib/python3.12/dist-packages/transformers && \
            cp -r src/openpi/models_pytorch/transformers_replace/* \$TF_DIR/ && \
            export PYTHONPATH=packages/openpi-client/src:src:.:/opt/omega:/workspace/third_party/flashrt && \
-           export OMEGA_E0M3_PACK=/workspace/third_party/flashrt/pi05_long_e0m3.pt && \
+           export OMEGA_E0M3_PACK=${OMEGA_E0M3_PACK:-/workspace/third_party/flashrt/pi05_long_e0m3.pt} && \
            export OMEGA_E0M3_CUDA_GRAPH=${OMEGA_E0M3_CUDA_GRAPH:-1} && \
            export GR00T_GPTQ=1 \
                   GR00T_GPTQ_PATH=/opt/omega/packs_hf/pi05_long/quantized.pt \

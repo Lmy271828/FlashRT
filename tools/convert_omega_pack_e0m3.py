@@ -14,7 +14,15 @@ Scale-fold strategies (--fold):
   mean : B = e0m3(W * diag(s_mean)), s_mean = act_scale_table.mean(dim=0).
          The runtime must then divide activations by s_t per step before
          quantization (strategy S1). Exact for the mean step; residual is
-         the table's step-to-step spread.
+         the table's step-to-step spread. BROKEN on hardware: raw s_mean
+         (~1e-2) shrinks weight columns, pressing per-16 block scales
+         below the UE4M3 subnormal floor (2^-9). Kept for reference.
+  actnorm : floor-safe S1. Decompose s_mean = c * r with c = geomean
+         (per-layer scalar) and r = s_mean / c (geomean 1, O(1) entries):
+         weights fold r (magnitudes preserved, no floor issue),
+         activations are divided by s_mean at runtime (static — no
+         per-step dispatch), and c is absorbed into the GEMM alpha.
+         Identity: (x/s_mean) @ (W*r)^T * c == x @ W^T.
 
 Auxiliary tensors needed by a runtime consumer (input/output rotations,
 permutation, scale tables) are copied through unchanged into the output.
@@ -56,7 +64,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--pack", required=True, help="input Omega quantized.pt")
     p.add_argument("--out", required=True, help="output .pt path")
-    p.add_argument("--fold", choices=("none", "mean"), default="mean",
+    p.add_argument("--fold", choices=("none", "mean", "actnorm"),
+                   default="mean",
                    help="scale-table fold strategy (default: mean)")
     p.add_argument("--layer-regex", default="",
                    help="only convert layers matching this regex")
@@ -102,10 +111,18 @@ def main() -> int:
         w = rec["weight_res_q"].to(device=device, dtype=torch.float16,
                                    non_blocking=False).contiguous()
         table = rec["act_scale_table"].float()
+        act_out_scale = None
         if args.fold == "mean":
             s_mean = table.mean(dim=0)  # (in,)
             w = (w * s_mean.to(device=device, dtype=torch.float16)
                    .unsqueeze(0)).contiguous()
+        elif args.fold == "actnorm":
+            s_mean = table.mean(dim=0).clamp_min(1e-12)  # (in,)
+            c = float(torch.exp(torch.log(s_mean).mean()))
+            r = s_mean / c                      # geomean 1, O(1) entries
+            w = (w * r.to(device=device, dtype=torch.float16)
+                   .unsqueeze(0)).contiguous()
+            act_out_scale = c
         n, k = w.shape
         if k % 16 != 0:
             print(f"skip {name}: K={k} not divisible by 16")
@@ -130,6 +147,12 @@ def main() -> int:
         aux_entry = {f: rec[f].clone() for f in AUX_TENSORS if f in rec}
         aux_entry.update({f: rec[f] for f in AUX_SCALARS if f in rec})
         aux_entry["fold"] = args.fold
+        if args.fold == "actnorm":
+            # Consumer contract: divide activations by act_scale_static
+            # (post-rotation, pre-quantize) and pass act_out_scale as the
+            # GEMM alpha. See the --fold actnorm note in the docstring.
+            aux_entry["act_scale_static"] = s_mean.clone()
+            aux_entry["act_out_scale"] = act_out_scale
         aux[name] = aux_entry
 
         if (i + 1) % 21 == 0 or i + 1 == len(names):

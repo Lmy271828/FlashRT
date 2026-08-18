@@ -10,8 +10,18 @@ with the real SM110 path, keeping everything else identical:
     y  = bmm(y'.view(M, N/64, 64), R_out_blocks) + bias     # torch, as Omega
 
 Weights come pre-converted from an Omega pack by
-tools/convert_omega_pack_e0m3.py (S0, --fold none; see
-docs/omega_pack_e0m3.md). Requires the compiled flash_rt_fp4 extension
+tools/convert_omega_pack_e0m3.py (see docs/omega_pack_e0m3.md). Two fold
+modes are supported:
+
+  fold=none (S0): plain e0m3(W); the calibration table is dropped.
+  fold=actnorm  : weights carry the geomean-normalized table r=s̄/c
+                  (floor-safe); the consumer divides post-rotation
+                  activations by s̄ (static, no per-step dispatch) and
+                  folds c into the GEMM alpha. Identity:
+                  (x/s̄) @ (W·r)^T · c == x @ W^T. Disable with
+                  OMEGA_E0M3_ACT_TABLE=0 (A/B vs S0).
+
+Requires the compiled flash_rt_fp4 extension
 (i.e. Thor). Activation dtype note: inputs are typically bf16 in openpi;
 they are rotated in their own dtype (as Omega does) and cast to fp16 only
 at the quantize-kernel boundary — well within fp16 range for activations.
@@ -44,10 +54,15 @@ def load_artifact(path: str) -> Dict[str, Any]:
     fmt = art.get("format")
     if fmt != "omega_e0m3_v1":
         raise ValueError(f"{path}: expected format 'omega_e0m3_v1', got {fmt!r}")
-    if art.get("fold") != "none":
-        raise ValueError(f"{path}: consumer implements S0 only, got "
+    if art.get("fold") not in ("none", "actnorm"):
+        raise ValueError(f"consumer implements fold none/actnorm only, got "
                          f"fold={art.get('fold')!r}")
     return art
+
+
+# Kill switch for the actnorm activation-side table application
+# (default on when the artifact carries it; set 0 for S0-vs-actnorm A/B).
+ACT_TABLE_ENV = "OMEGA_E0M3_ACT_TABLE"
 
 
 class OmegaE0M3Linear(nn.Module):
@@ -92,6 +107,18 @@ class OmegaE0M3Linear(nn.Module):
         self.register_buffer("_r_out", aux["duquant_rotation_out_blocks"],
                              persistent=False)
 
+        # actnorm (floor-safe S1): static per-channel activation scale and
+        # the matching GEMM alpha. Absent in S0 (fold=none) artifacts.
+        if "act_scale_static" in aux and \
+                os.environ.get(ACT_TABLE_ENV, "1") not in ("0", "false", "False"):
+            self.register_buffer("_act_scale_static",
+                                 aux["act_scale_static"].float(),
+                                 persistent=False)
+            self._act_out_scale = float(aux["act_out_scale"])
+        else:
+            self._act_scale_static = None
+            self._act_out_scale = 1.0
+
     @property
     def weight(self) -> torch.Tensor:
         """Zero-element placeholder carrying the base dtype (see __init__)."""
@@ -115,6 +142,8 @@ class OmegaE0M3Linear(nn.Module):
         orig_shape, in_dtype = x.shape, x.dtype
         x2 = x.reshape(-1, orig_shape[-1])
         x2 = self._rotate(x2, self._perm, self._r_in)
+        if self._act_scale_static is not None:
+            x2 = x2 / self._act_scale_static.to(dtype=x2.dtype)
         x2 = x2.to(torch.float16).contiguous()
 
         m, k = x2.shape
@@ -135,7 +164,7 @@ class OmegaE0M3Linear(nn.Module):
         rc = fvk_fp4.cutlass_fp4_gemm_e0m3w(
             a_packed.data_ptr(), a_sfa.data_ptr(),
             self._packed.data_ptr(), self._sfb.data_ptr(), y.data_ptr(),
-            m, n, k, 1.0, 0.0, stream, 0)
+            m, n, k, self._act_out_scale, 0.0, stream, 0)
         if rc != 0:
             raise RuntimeError(f"{self.name}: gemm rc={rc:#x}")
 
