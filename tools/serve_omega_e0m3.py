@@ -20,6 +20,10 @@ Environment:
                             (~25 min per episode). Eager + tcgen05 GEMM is
                             both faster and simpler on this path. Set 0 to
                             keep the checkpoint's compile mode.
+  OMEGA_E0M3_CUDA_GRAPH  1 to capture the 10-step denoise loop into a
+                            single CUDA graph (tools/omega_e0m3_graph.py);
+                            default 0 = plain eager. Capture is lazy (first
+                            inference) and falls back to eager on failure.
   OMEGA_SERVICE             service script path
                             (default /opt/omega/scripts/openpi_inference_service.py)
 
@@ -53,6 +57,29 @@ def _disable_torch_compile() -> None:
     print("[OMEGA-E0M3] torch.compile disabled (eager mode)", flush=True)
 
 
+def _install_cuda_graph_hook() -> None:
+    """Wrap create_trained_policy so the graphed denoise gets installed on
+    the served policy's model. Policy.__init__ caches
+    `self._sample_actions = model.sample_actions` at construction time, so
+    after installing the monkeypatch we must rebind the cached reference.
+    Capture itself is lazy (first inference) and therefore runs after the
+    Omega wrap step has replaced the linears with E0M3 consumers."""
+    import openpi.policies.policy_config as policy_config
+
+    orig = policy_config.create_trained_policy
+
+    def wrapped(*args, **kwargs):
+        policy = orig(*args, **kwargs)
+        import omega_e0m3_graph as oeg
+        gd = oeg.install(policy._model)  # noqa: SLF001
+        if gd is not None:
+            policy._sample_actions = \
+                policy._model.sample_actions  # noqa: SLF001
+        return policy
+
+    policy_config.create_trained_policy = wrapped
+
+
 def main() -> None:
     service = os.environ.get(
         "OMEGA_SERVICE", "/opt/omega/scripts/openpi_inference_service.py")
@@ -62,6 +89,7 @@ def main() -> None:
             not in ("0", "false", "False"):
         _disable_torch_compile()
     oel.install(patch_duquant=patch_duquant)
+    _install_cuda_graph_hook()
     runpy.run_path(service, run_name="__main__")
 
 

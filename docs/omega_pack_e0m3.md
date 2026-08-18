@@ -220,6 +220,32 @@ p50/p95 latency: ① converter + this format doc (pure additive, easiest);
 shrunk this from the originally-planned per-step scale path); ③ SVDQuant
 low-rank epilogue (deferred — rank = 0 in this pack).
 
+**Milestone 2 status (done, incl. 2c/2d landed after the original
+write-up):**
+
+- **M2a/b — consumer + serving (done).** `tools/omega_e0m3_linear.py`
+  (`OmegaE0M3Linear`, drop-in for gr00t's `GptqLinear` via
+  `tools/serve_omega_e0m3.py` monkeypatch) + `tools/check_omega_e0m3_consumer.py`
+  gate: per-layer cosine 0.978–0.982 vs. GptqLinear, 1.2× layer latency.
+  Server smoke 10/10 ≙ arm D; **LIBERO-10 ×500 paired: 90.4%** vs. BF16
+  91.6% (McNemar p = 0.53) and vs. fake-quant arm D 93.2% (p = 0.070) —
+  no significant loss; 58 s/episode vs. 148 s fake-quant (2.6×). Eager
+  mode with `torch.compile` disabled: the pybind kernels graph-break and
+  the HF KV cache recompiles per step (~25 min/episode stall) — see the
+  env flags in `serve_omega_e0m3.py`.
+- **M2d — hand-rolled CUDA graph over the whole denoise loop (done).**
+  `tools/omega_e0m3_graph.py` captures all 10 flow-matching steps
+  (unrolled, pi05_thor style) into one `torch.cuda.CUDAGraph`: static KV
+  slabs behind a `DynamicCache` shell, static mask/position buffers
+  filled by `copy_` per inference, adaRMS conditioning precomputed for
+  the deterministic time grid. The eager blockers removed are documented
+  in the module docstring (device-scalar `while`, per-step H2D mask
+  upload, per-call KV allocation). Enable with `OMEGA_E0M3_CUDA_GRAPH=1`
+  (see `tools/start_e0m3_server.sh`); falls back to eager permanently on
+  any capture failure. Thor validation: capture succeeds
+  (`prefix_len=968, layers=18, steps=10`), smoke 10/10, ~43–50
+  s/episode vs. ~58 s eager.
+
 Deliverables:
 
 - `tools/convert_omega_pack_e0m3.py` — offline pack → E0M3 converter
@@ -229,10 +255,17 @@ Deliverables:
   Omega fake-quant reference vs. FlashRT E0M3 GEMM (S0/S1), plus a pure
   torch emulation mode that runs without the extension for pre-checks.
   Emulation results and the S0 decision are in §4.
-
-Next verification steps, in order: `--mode kernel` on Thor (real tcgen05
-GEMM vs. emulation) → captured real activations instead of synthetic →
-LIBERO paired SR on a runtime wired to the converted pack (Milestone 2).
+- `tools/omega_e0m3_linear.py` — `OmegaE0M3Linear` consumer (M2a).
+- `tools/check_omega_e0m3_consumer.py` — consumer-vs-GptqLinear gate
+  (cosine + layer latency).
+- `tools/serve_omega_e0m3.py` — openpi serving entry (monkeypatches
+  gr00t's wrap classes; env-gated compile kill switch).
+- `tools/omega_e0m3_graph.py` — CUDA-graph capture of the 10-step
+  denoise loop (M2d), `OMEGA_E0M3_CUDA_GRAPH=1`.
+- `tools/check_omega_e0m3_graph_smoke.py` — P0 capture gate for a single
+  consumer layer (pybind capturability check).
+- `tools/start_e0m3_server.sh` — Thor server launcher (repo-relative
+  paths, env overrides).
 
 Deferred: SVDQuant low-rank epilogue (rank = 0 everywhere in this pack),
 per-step weight tables (10× memory; also refuted by the S0 result),
