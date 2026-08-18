@@ -273,6 +273,25 @@ per-step activation scale dispatch (refuted by the S0 result).
 
 ### Reproducing
 
+**Self-contained fixture round-trip (no Omega-QVLA pack or checkout
+needed — the PR review path):**
+
+```bash
+cd third_party/flashrt
+# 1. Synthetic miniature pack: schema-identical records, random
+#    orthogonal rotations, outlier-channel weights (pure CPU, seconds)
+python tools/gen_omega_pack_fixture.py --out /tmp/fixture_pack.pt
+# 2. Convert (Thor)
+python tools/convert_omega_pack_e0m3.py --pack /tmp/fixture_pack.pt \
+    --out /tmp/fixture_e0m3.pt --fold none
+# 3. Consumer vs fp16 reference, gr00t-free (Thor)
+PYTHONPATH=$PWD/tools python tools/check_omega_e0m3_consumer.py \
+    --reference fp16 --pack /tmp/fixture_pack.pt \
+    --artifact /tmp/fixture_e0m3.pt
+```
+
+**Full pack (development path):**
+
 ```bash
 # Point at an Omega pack (any machine for emulate, Thor for kernel/convert)
 export OMEGA_PACK=/path/to/Omega-QVLA/packs_hf/pi05_long/quantized.pt
