@@ -204,11 +204,14 @@ def run_child(args) -> int:
         os.environ.setdefault("GR00T_GPTQ_PATH", args.pack)
     if args.child_mode == "e0m3":
         os.environ.setdefault("OMEGA_E0M3_PACK", args.artifact)
-        # The E0M3 consumers graph-break torch.compile (pybind kernels);
-        # eager is the production mode on this path.
-        def _noop_compile(model=None, **kwargs):
-            return (lambda m: m) if model is None else model
-        torch.compile = _noop_compile  # type: ignore[assignment]
+    # All children run eager: this harness measures eager numerics (the
+    # printed infer_ms is an eager-latency signal), the E0M3 pybind kernels
+    # graph-break torch.compile anyway, and the compiled prefix attention
+    # traces SDPA with an fp32 mask -> "invalid dtype for bias" against the
+    # bf16 query (eager attention tolerates the mask dtype).
+    def _noop_compile(model=None, **kwargs):
+        return (lambda m: m) if model is None else model
+    torch.compile = _noop_compile  # type: ignore[assignment]
 
     from openpi.policies import policy_config as _policy_config
     from openpi.training import config as _config
