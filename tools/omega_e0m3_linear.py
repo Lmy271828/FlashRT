@@ -225,6 +225,11 @@ def install(artifact_path: Optional[str] = None,
     def make_factory(orig_cls):
         def factory(base, name, cfg, weight_bits=None):
             if name in artifact["weights"]:
+                # The host wrap_* log line still says "DuQuantLinear"/
+                # "GptqLinear" (it prints from cfg); log the actual swap
+                # on its own line so the two stay distinguishable.
+                print(f"[OMEGA-E0M3][REPLACED] {name} "
+                      f"(via {orig_cls.__name__})", flush=True)
                 return OmegaE0M3Linear(base, name, artifact)
             return orig_cls(base, name=name, cfg=cfg, weight_bits=weight_bits)
         return factory
