@@ -9,6 +9,11 @@
 #   OMEGA_ROOT    default: $HOME/lmy/Omega-QVLA
 #   OMEGA_E0M3_PACK   default: /workspace/third_party/flashrt/pi05_long_e0m3.pt
 #                     (container path! e.g. the actnorm A/B artifact)
+#   OMEGA_E0M3_PATCH_DUQUANT   default: 1 — route A: PaliGemma layers are
+#                     also replaced by E0M3 consumers from the pack records
+#                     (official Omega recipe is all-W4A4; this also upgrades
+#                     PaliGemma from runtime RTN to the pack's GPTQ weights).
+#                     Set 0 for the legacy hybrid (expert-only E0M3).
 #   OPENPI_CACHE  default: $HOME/.cache/openpi
 #
 # Usage:
@@ -36,6 +41,7 @@ sudo docker run -d --name pi05_server --runtime nvidia \
            export PYTHONPATH=packages/openpi-client/src:src:.:/opt/omega:/workspace/third_party/flashrt && \
            export OMEGA_E0M3_PACK=${OMEGA_E0M3_PACK:-/workspace/third_party/flashrt/pi05_long_e0m3.pt} && \
            export OMEGA_E0M3_CUDA_GRAPH=${OMEGA_E0M3_CUDA_GRAPH:-1} && \
+           export OMEGA_E0M3_PATCH_DUQUANT=${OMEGA_E0M3_PATCH_DUQUANT:-1} && \
            export GR00T_GPTQ=1 \
                   GR00T_GPTQ_PATH=/opt/omega/packs_hf/pi05_long/quantized.pt \
                   GR00T_GPTQ_INCLUDE='.*paligemma_with_expert\.gemma_expert\.model\.layers\.[0-9]+\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj).*' \
