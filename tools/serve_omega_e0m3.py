@@ -26,6 +26,12 @@ Environment:
                             (validated: smoke 10/10, 50-ep 45/50 = 90.0%
                             ≈ eager 90.4%). Capture is lazy (first
                             inference) and falls back to eager on failure.
+                            Auto-skipped when PI05_T_GRID is set (custom
+                            grids take the eager branch in sample_actions).
+  OMEGA_E0M3_ZERO_NOISE  1 to start sampling from zeros instead of
+                            N(0, I). Required for MIP-trained 2-step
+                            models (step 1 input is all-zeros by design);
+                            default: 1 when PI05_T_GRID is set, else 0.
   OMEGA_SERVICE             service script path
                             (default /opt/omega/scripts/openpi_inference_service.py)
 
@@ -34,6 +40,12 @@ Example (inside the openpi docker container, after the usual env):
   python -u /workspace/third_party/flashrt/tools/serve_omega_e0m3.py \
       --model_path /root/.cache/openpi/openpi-assets/checkpoints/pi05_libero_pytorch \
       --data_config pi05_libero --port 8000
+
+MIP 2-step example (t*=0.9):
+  export OMEGA_E0M3_PACK=/workspace/third_party/flashrt/pi05_mip2step_e0m3.pt
+  export PI05_T_GRID="1.0:-1.0;0.1:-0.1"   # zero-noise is auto-enabled
+  python -u /workspace/third_party/flashrt/tools/serve_omega_e0m3.py \
+      --model_path <mip-qat checkpoint dir> --data_config pi05_libero --port 8000
 """
 
 from __future__ import annotations
@@ -66,6 +78,10 @@ def _install_cuda_graph_hook() -> None:
     after installing the monkeypatch we must rebind the cached reference.
     Capture itself is lazy (first inference) and therefore runs after the
     Omega wrap step has replaced the linears with E0M3 consumers."""
+    if os.environ.get("PI05_T_GRID"):
+        print("[OMEGA-E0M3] cuda graph: skipped (PI05_T_GRID custom grid "
+              "takes the eager branch)", flush=True)
+        return
     import openpi.policies.policy_config as policy_config
 
     orig = policy_config.create_trained_policy
@@ -82,6 +98,33 @@ def _install_cuda_graph_hook() -> None:
     policy_config.create_trained_policy = wrapped
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    return os.environ.get(name, "1" if default else "0") not in ("0", "false", "False")
+
+
+def _install_zero_noise_hook() -> None:
+    """Start sampling from zeros (MIP 2-step models expect an all-zeros
+    step-1 input). sample_actions looks up self.sample_noise at call time,
+    so patching the instance attribute is enough — no rebinding needed."""
+    import openpi.policies.policy_config as policy_config
+
+    orig = policy_config.create_trained_policy
+
+    def wrapped(*args, **kwargs):
+        policy = orig(*args, **kwargs)
+        import torch
+        model = policy._model  # noqa: SLF001
+
+        def zero_noise(shape, device):
+            return torch.zeros(shape, device=device)
+
+        model.sample_noise = zero_noise
+        print("[OMEGA-E0M3] zero-noise sampling installed (MIP mode)", flush=True)
+        return policy
+
+    policy_config.create_trained_policy = wrapped
+
+
 def main() -> None:
     service = os.environ.get(
         "OMEGA_SERVICE", "/opt/omega/scripts/openpi_inference_service.py")
@@ -92,6 +135,8 @@ def main() -> None:
         _disable_torch_compile()
     oel.install(patch_duquant=patch_duquant)
     _install_cuda_graph_hook()
+    if _env_flag("OMEGA_E0M3_ZERO_NOISE", default=bool(os.environ.get("PI05_T_GRID"))):
+        _install_zero_noise_hook()
     runpy.run_path(service, run_name="__main__")
 
 
