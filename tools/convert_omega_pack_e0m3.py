@@ -32,11 +32,11 @@ the quantize kernels are plain CUDA but the GEMM they feed is SM110).
 
 Usage:
   python tools/convert_omega_pack_e0m3.py \
-      --pack ~/lmy/Omega-QVLA/packs_hf/pi05_long/quantized.pt \
-      --out ~/lmy/omega_e0m3/pi05_long_e0m3_mean.pt --fold mean
+      --pack /path/to/Omega-QVLA/packs_hf/pi05_long/quantized.pt \
+      --out pi05_long_e0m3.pt --fold none
   # subset for bring-up:
   python tools/convert_omega_pack_e0m3.py --pack ... --out /tmp/one.pt \
-      --fold mean --layer-regex 'layers\.0\.self_attn\.q_proj'
+      --fold none --layer-regex 'layers\.0\.self_attn\.q_proj'
 """
 
 from __future__ import annotations
@@ -65,8 +65,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pack", required=True, help="input Omega quantized.pt")
     p.add_argument("--out", required=True, help="output .pt path")
     p.add_argument("--fold", choices=("none", "mean", "actnorm"),
-                   default="mean",
-                   help="scale-table fold strategy (default: mean)")
+                   default="none",
+                   help="scale-table fold strategy (default: none = S0; "
+                        "mean/actnorm are ablation-only, see docstring)")
     p.add_argument("--layer-regex", default="",
                    help="only convert layers matching this regex")
     p.add_argument("--keep-fp16", action="store_true",
