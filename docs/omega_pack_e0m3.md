@@ -71,7 +71,7 @@ deliberately absent — they break under A4 and stay BF16 at runtime.
 | `duquant_rotation_blocks` | `(in/64, 64, 64)` fp16 | block-diagonal input rotation R_in |
 | `duquant_rotation_perm` | `(in,)` int64 | input-channel permutation (applied before R_in) |
 | `duquant_rotation_out_blocks` | `(out/64, 64, 64)` fp16 | block-diagonal output rotation (restore) |
-| `weight_bits` / `a_bits` | int | 4 / 4 (expert). PaliGemma records also say 4 but the runtime overrides activations to A8 |
+| `weight_bits` / `a_bits` | int | 4 / 4 (both sides). The *runtime* `DuQuantLinear` path defaults activations to A8 (`GR00T_DUQUANT_ABITS`), which is where the "W4A8 PaliGemma" label comes from; pack records consumed through `GptqLinear` use their own `a_bits` (4) |
 | `in_features` / `out_features` | int | redundant with tensor shapes |
 | `n_calib_*`, `act_percentile`, `gptq_damp_percent` | scalars | calibration provenance |
 
@@ -276,6 +276,20 @@ write-up):**
   any capture failure. Thor validation: capture succeeds
   (`prefix_len=968, layers=18, steps=10`), smoke 10/10, ~43–50
   s/episode vs. ~58 s eager.
+- **M2e — PaliGemma E0M3 (route A: official all-W4A4 pack recipe).** The
+  converter already emits all 252 records, PaliGemma included; serving
+  with `OMEGA_E0M3_PATCH_DUQUANT=1` (the default in
+  `tools/start_e0m3_server.sh`) substitutes the runtime `DuQuantLinear`
+  wraps with `OmegaE0M3Linear` consumers built from the pack's PaliGemma
+  records — GPTQ W4A4 weights instead of runtime RTN, single-row scale
+  table dropped per the S0 decision. With `omega_e0m3_graph.py`'s prefix
+  graph (default on), the prefix prefill is captured too, so the E0M3
+  pybind kernels run inside a CUDA graph on this path as well — the
+  capture smoke (`check_omega_e0m3_graph_smoke.py`) covers their
+  capturability.
+  Validation ladder on Thor: artifact coverage check (252 records) →
+  per-layer consumer gate on PaliGemma layers → 10-episode smoke →
+  LIBERO-10 ×500 paired SR + per-episode latency.
 
 Deliverables:
 
@@ -357,9 +371,16 @@ layer tested (see §4).
 
 ## 6. Accuracy context (pi0.5 LIBERO-10, 500 episodes)
 
-This pack's full recipe (W4A4 expert + W4A8 PaliGemma, per-step scales)
-scores 93.2% vs. BF16 baseline 91.6% (McNemar p = 0.32, no significant
-difference) on the Omega PyTorch fake-quant path. The E0M3 migration target
+The 93.2% figure was measured on the hybrid deployment: expert records from
+this pack (W4A4, `GptqLinear`) + PaliGemma via the *runtime* DuQuant path
+(W4 weights, A8 activations by the `GR00T_DUQUANT_ABITS` default) — vs. BF16
+baseline 91.6% (McNemar p = 0.32, no significant difference) on the Omega
+PyTorch fake-quant path. The pack itself is the official Omega recipe,
+which is W4A4 on both sides (PaliGemma records carry `a_bits=4` and a
+single-row `act_scale_table`); consuming the PaliGemma records through the
+E0M3 consumer (`OMEGA_E0M3_PATCH_DUQUANT=1`) therefore *is* the official
+recipe, and additionally replaces runtime RTN weights with the pack's GPTQ
+weights. The E0M3 migration target
 is therefore "no measurable SR loss against an already lossless baseline" —
 the single-layer cosine gates are the leading indicator, LIBERO the final
 one.
