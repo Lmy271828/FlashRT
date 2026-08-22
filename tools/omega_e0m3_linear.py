@@ -107,6 +107,13 @@ class OmegaE0M3Linear(nn.Module):
         self.register_buffer("_r_out", aux["duquant_rotation_out_blocks"],
                              persistent=False)
 
+        # gr00t's wrap_duquant reads these off the constructed layer for its
+        # [REPLACED] log line; mirror the contract (same idea as
+        # _quant_available above) so the patched-in class survives it.
+        self._block_size = int(self._r_in.shape[-1])
+        self._block_out_size = int(self._r_out.shape[-1])
+        self._act_stats_available = True
+
         # actnorm (floor-safe S1): static per-channel activation scale and
         # the matching GEMM alpha. Absent in S0 (fold=none) artifacts.
         if "act_scale_static" in aux and \
