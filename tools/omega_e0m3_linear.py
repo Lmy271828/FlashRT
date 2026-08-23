@@ -131,24 +131,46 @@ class OmegaE0M3Linear(nn.Module):
         """Zero-element placeholder carrying the base dtype (see __init__)."""
         return self._weight_fp
 
+    def _blocks_as(self, blocks: torch.Tensor, key: str,
+                   dtype: torch.dtype) -> torch.Tensor:
+        """Rotation blocks cast once per (buffer, dtype), not once per call.
+
+        Cache entries created during CUDA-graph capture are replay-safe: the
+        cast kernel is captured and rewrites the same persistent tensor on
+        every replay. Our flows never run eager after capture within one
+        process (bench/server capture on first infer; harness children are
+        separate eager-only processes).
+        """
+        cache = self.__dict__.setdefault("_blocks_cache", {})
+        ck = (key, dtype, str(blocks.device))
+        t = cache.get(ck)
+        if t is None:
+            t = cache[ck] = blocks.to(dtype=dtype)
+        return t
+
     def _rotate(self, x: torch.Tensor, perm: Optional[torch.Tensor],
-                blocks: torch.Tensor) -> torch.Tensor:
-        """x[M, D] -> bmm(x[:, perm].view(M, nb, B), blocks); matches Omega."""
+                blocks: torch.Tensor, key: str) -> torch.Tensor:
+        """x[M, D] -> bmm(x[:, perm].view(M, nb, B), blocks); matches Omega.
+
+        Zero-copy input side: the batch-first view (nb, M, B) keeps inner
+        stride 1, so cuBLAS strided-batched GEMV consumes the transposed
+        view directly — no transpose+contiguous materialization. One copy
+        remains on the return reshape (output layout), half the old two.
+        """
         nb, b, _ = blocks.shape
         m = x.shape[0]
         if perm is not None:
             x = x.index_select(dim=-1, index=perm)
-        x = x.reshape(m, nb, b)
-        x = torch.bmm(x.transpose(0, 1).contiguous(),
-                      blocks.to(dtype=x.dtype))
-        return x.transpose(0, 1).contiguous().reshape(m, nb * b)
+        rot = self._blocks_as(blocks, key, x.dtype)
+        y = torch.bmm(x.view(m, nb, b).transpose(0, 1), rot)
+        return y.transpose(0, 1).reshape(m, nb * b)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         import flash_rt.flash_rt_fp4 as fvk_fp4
 
         orig_shape, in_dtype = x.shape, x.dtype
         x2 = x.reshape(-1, orig_shape[-1])
-        x2 = self._rotate(x2, self._perm, self._r_in)
+        x2 = self._rotate(x2, self._perm, self._r_in, "in")
         if self._act_scale_static is not None:
             x2 = x2 / self._act_scale_static.to(dtype=x2.dtype)
         x2 = x2.to(torch.float16).contiguous()
@@ -175,7 +197,7 @@ class OmegaE0M3Linear(nn.Module):
         if rc != 0:
             raise RuntimeError(f"{self.name}: gemm rc={rc:#x}")
 
-        y = self._rotate(y, None, self._r_out)
+        y = self._rotate(y, None, self._r_out, "out")
         y = y.to(in_dtype).reshape(*orig_shape[:-1], n)
         if self.bias is not None:
             y = y + self.bias.to(dtype=y.dtype)
