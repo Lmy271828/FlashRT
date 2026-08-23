@@ -56,7 +56,10 @@ def parse_args() -> argparse.Namespace:
                    help="reference arm: do not install the CUDA graphs")
     p.add_argument("--fa4", action="store_true",
                    help="route Gemma attention through the vendored FA4 "
-                        "kernels (requires the flashrt_fa4 package)")
+                        "kernels (eager-only, forces --eager)")
+    p.add_argument("--save-actions", metavar="PATH",
+                   help="save per-iter actions npy for cross-run numerics "
+                        "gates (e.g. default vs --fa4)")
     p.add_argument("--output", help="optional json result path")
     return p.parse_args()
 
@@ -121,7 +124,12 @@ def main() -> int:
 
     if args.fa4:
         import omega_fa4_attention  # noqa: PLC0415
-        omega_fa4_attention.install(model)
+        omega_fa4_attention.install()
+        if not args.eager:
+            print("[BENCH] --fa4 is capture-unsafe (host-side mask "
+                  "reduction); forcing --eager. Graphed FA4 is M3b.",
+                  flush=True)
+            args.eager = True
 
     gd = None
     if not args.eager:
@@ -142,15 +150,20 @@ def main() -> int:
             print("[BENCH] first infer done", flush=True)
 
     wall_ms, inner_ms = [], []
+    acts = []
     for i in range(args.iters):
         t0 = time.perf_counter()
         out = policy.infer(obs(i % n))  # noise=None: graph path
         wall_ms.append((time.perf_counter() - t0) * 1e3)
         inner_ms.append(float(out["policy_timing"]["infer_ms"]))
+        if args.save_actions:
+            acts.append(np.asarray(out["actions"], dtype=np.float32))
 
     actions = np.asarray(out["actions"])
     if not np.isfinite(actions).all():
         raise RuntimeError("non-finite actions in the last iter")
+    if args.save_actions:
+        np.save(args.save_actions, np.stack(acts))
 
     def stats(xs):
         return {"p50": float(np.median(xs)), "p95": float(np.percentile(xs, 95)),
