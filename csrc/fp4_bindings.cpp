@@ -28,6 +28,7 @@
 #include "quantize/quantize_fp4_dynamic.cuh"
 #include "quantize/quantize_fp4_sfa.cuh"
 #include "quantize/quantize_e0m3_sfa.cuh"
+#include "quantize/quantize_e0m3_duquant.cuh"
 #include "gemm/fp4/cutlass_fp4_gemm_e0m3w_sm100.cuh"
 #include "fused_fp4/pi05_e0m3_act.cuh"
 #include "fused_fp4/siglip_ln_vec.cuh"
@@ -295,6 +296,56 @@ tile-interleave conversion is required.
         py::arg("N"), py::arg("D"), py::arg("is_sfb"), py::arg("stream") = 0,
         "FP16 to E0M3 (uniform INT4) quantization with per-16 UE4M3 SFA/SFB "
         "scales; packed/scale layouts match the NVFP4 quantizers.");
+
+  m.def("quantize_e0m3_duquant_sfa_bf16",
+        [](uintptr_t src, uintptr_t perm, uintptr_t rot, uintptr_t act_scale,
+           uintptr_t packed, uintptr_t sfa,
+           int M, int K, uintptr_t stream) -> int {
+          const auto shape = fp4_kernel_shape({{"M", M}, {"K", K}});
+          require_fp4_ptrs("quantize_e0m3_duquant_sfa_bf16",
+                           {{"src", src}, {"perm", perm}, {"rot", rot},
+                            {"packed", packed}, {"sfa", sfa}}, shape);
+          require_fp4(M > 0 && K > 0 && (K % 64) == 0,
+                      "quantize_e0m3_duquant_sfa_bf16",
+                      "M must be positive and K a positive multiple of 64",
+                      shape);
+          return flash_rt::fp4::quantize_e0m3_duquant_sfa_bf16(
+              reinterpret_cast<void const*>(src),
+              reinterpret_cast<void const*>(perm),
+              reinterpret_cast<void const*>(rot),
+              act_scale ? reinterpret_cast<void const*>(act_scale) : nullptr,
+              reinterpret_cast<void*>(packed), reinterpret_cast<void*>(sfa),
+              M, K, reinterpret_cast<cudaStream_t>(stream));
+        },
+        py::arg("src"), py::arg("perm"), py::arg("rot"), py::arg("act_scale"),
+        py::arg("packed"), py::arg("sfa"), py::arg("M"), py::arg("K"),
+        py::arg("stream") = 0,
+        "Fused DuQuant perm + 64-block rotation + optional actnorm divide + "
+        "per-16 E0M3 dynamic quantize with SFA scales (bf16 activations; "
+        "replicates the omega_e0m3_linear.py PyTorch rounding chain).");
+
+  m.def("duquant_rotate_out_bf16",
+        [](uintptr_t src, uintptr_t rot, uintptr_t bias, uintptr_t dst,
+           int M, int N, uintptr_t stream) -> int {
+          const auto shape = fp4_kernel_shape({{"M", M}, {"N", N}});
+          require_fp4_ptrs("duquant_rotate_out_bf16",
+                           {{"src", src}, {"rot", rot}, {"dst", dst}}, shape);
+          require_fp4(M > 0 && N > 0 && (N % 64) == 0,
+                      "duquant_rotate_out_bf16",
+                      "M must be positive and N a positive multiple of 64",
+                      shape);
+          return flash_rt::fp4::duquant_rotate_out_bf16(
+              reinterpret_cast<void const*>(src),
+              reinterpret_cast<void const*>(rot),
+              bias ? reinterpret_cast<void const*>(bias) : nullptr,
+              reinterpret_cast<void*>(dst),
+              M, N, reinterpret_cast<cudaStream_t>(stream));
+        },
+        py::arg("src"), py::arg("rot"), py::arg("bias"), py::arg("dst"),
+        py::arg("M"), py::arg("N"), py::arg("stream") = 0,
+        "Fused DuQuant 64-block output rotation + fp16->bf16 cast + optional "
+        "bias add (replicates the omega_e0m3_linear.py PyTorch rounding "
+        "chain).");
 
   m.def("quantize_fp4_dynamic_sfa_fp16",
         [](uintptr_t src, uintptr_t packed, uintptr_t sfa,

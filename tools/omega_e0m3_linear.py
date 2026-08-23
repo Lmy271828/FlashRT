@@ -102,6 +102,9 @@ class OmegaE0M3Linear(nn.Module):
         self.register_buffer("_sfb", w["sfb"], persistent=False)
         self.register_buffer("_perm", aux["duquant_rotation_perm"].long(),
                              persistent=False)
+        # int32 twin for the fused quantize kernel (fallback path uses _perm).
+        self.register_buffer("_perm_i32", aux["duquant_rotation_perm"].int(),
+                             persistent=False)
         self.register_buffer("_r_in", aux["duquant_rotation_blocks"],
                              persistent=False)
         self.register_buffer("_r_out", aux["duquant_rotation_out_blocks"],
@@ -169,23 +172,38 @@ class OmegaE0M3Linear(nn.Module):
         import flash_rt.flash_rt_fp4 as fvk_fp4
 
         orig_shape, in_dtype = x.shape, x.dtype
-        x2 = x.reshape(-1, orig_shape[-1])
-        x2 = self._rotate(x2, self._perm, self._r_in, "in")
-        if self._act_scale_static is not None:
-            x2 = x2 / self._act_scale_static.to(dtype=x2.dtype)
-        x2 = x2.to(torch.float16).contiguous()
-
+        x2 = x.reshape(-1, orig_shape[-1]).contiguous()
         m, k = x2.shape
         n = self.out_features
         dev = x2.device
         stream = torch.cuda.current_stream(dev).cuda_stream
 
+        # Fused kernels fold the whole DuQuant glue chain into one launch per
+        # side. Fall back to the PyTorch chain when the extension predates
+        # them (or the pack uses a non-64 block).
+        fused_in = (in_dtype == torch.bfloat16 and self._block_size == 64
+                    and hasattr(fvk_fp4, "quantize_e0m3_duquant_sfa_bf16"))
+        fused_out = (in_dtype == torch.bfloat16 and self._block_out_size == 64
+                     and hasattr(fvk_fp4, "duquant_rotate_out_bf16"))
+
         a_packed = torch.empty(m, k // 2, dtype=torch.uint8, device=dev)
         a_sfa = torch.zeros(fvk_fp4.sfa_size_bytes(m, k, False),
                             dtype=torch.uint8, device=dev)
-        rc = fvk_fp4.quantize_e0m3_dynamic_sfa_fp16(
-            x2.data_ptr(), a_packed.data_ptr(), a_sfa.data_ptr(),
-            m, k, False, stream)
+        if fused_in:
+            rot_in = self._blocks_as(self._r_in, "in", torch.bfloat16)
+            rc = fvk_fp4.quantize_e0m3_duquant_sfa_bf16(
+                x2.data_ptr(), self._perm_i32.data_ptr(), rot_in.data_ptr(),
+                self._act_scale_static.data_ptr()
+                if self._act_scale_static is not None else 0,
+                a_packed.data_ptr(), a_sfa.data_ptr(), m, k, stream)
+        else:
+            x2 = self._rotate(x2, self._perm, self._r_in, "in")
+            if self._act_scale_static is not None:
+                x2 = x2 / self._act_scale_static.to(dtype=x2.dtype)
+            x2 = x2.to(torch.float16).contiguous()
+            rc = fvk_fp4.quantize_e0m3_dynamic_sfa_fp16(
+                x2.data_ptr(), a_packed.data_ptr(), a_sfa.data_ptr(),
+                m, k, False, stream)
         if rc != 0:
             raise RuntimeError(f"{self.name}: A quantize rc={rc}")
 
@@ -196,6 +214,17 @@ class OmegaE0M3Linear(nn.Module):
             m, n, k, self._act_out_scale, 0.0, stream, 0)
         if rc != 0:
             raise RuntimeError(f"{self.name}: gemm rc={rc:#x}")
+
+        if fused_out:
+            rot_out = self._blocks_as(self._r_out, "out", torch.float16)
+            out = torch.empty(m, n, dtype=in_dtype, device=dev)
+            rc = fvk_fp4.duquant_rotate_out_bf16(
+                y.data_ptr(), rot_out.data_ptr(),
+                self.bias.data_ptr() if self.bias is not None else 0,
+                out.data_ptr(), m, n, stream)
+            if rc != 0:
+                raise RuntimeError(f"{self.name}: out rotate rc={rc}")
+            return out.reshape(*orig_shape[:-1], n)
 
         y = self._rotate(y, None, self._r_out, "out")
         y = y.to(in_dtype).reshape(*orig_shape[:-1], n)
